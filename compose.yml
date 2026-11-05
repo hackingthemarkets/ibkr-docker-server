@@ -1,0 +1,28 @@
+name: ibkr-paper
+
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:10.45.1j
+    restart: unless-stopped
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD_FILE: /run/secrets/tws_password
+      VNC_SERVER_PASSWORD_FILE: /run/secrets/vnc_password
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      READ_ONLY_API: ${READ_ONLY_API:-yes}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:59 PM}
+      TIME_ZONE: ${TIME_ZONE:-America/New_York}
+    ports:
+      - "127.0.0.1:4002:4004"
+      - "127.0.0.1:5900:5900"
+    secrets:
+      - tws_password
+      - vnc_password
+
+secrets:
+  tws_password:
+    file: ./secrets/tws_password.txt
+  vnc_password:
+    file: ./secrets/vnc_password.txt

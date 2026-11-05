@@ -1,0 +1,2 @@
+# These files run on Linux, so keep Linux line endings on every platform.
+* text=auto eol=lf
