@@ -2,7 +2,7 @@ name: ibkr-paper
 
 services:
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:10.45.1j
+    image: ghcr.io/gnzsnz/ib-gateway:10.50.1f
     restart: unless-stopped
     environment:
       TWS_USERID: ${TWS_USERID}
