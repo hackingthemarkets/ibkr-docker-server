@@ -18,8 +18,16 @@ be open to the internet.
 
 ## Start Gateway on the server
 
-These steps assume Docker is installed. Keep your settings outside this
-repository so that credentials never sit in a Git checkout:
+These steps assume Docker is installed. Get the code:
+
+```bash
+sudo apt-get install -y git python3-venv
+git clone https://github.com/hackingthemarkets/ibkr-docker-server.git
+cd ibkr-docker-server
+```
+
+Keep your settings outside this repository so that credentials never sit in a
+Git checkout:
 
 ```bash
 mkdir -p ~/ibkr-stack/secrets
@@ -111,12 +119,15 @@ sudo docker compose pull
 sudo docker compose up -d
 ```
 
-Afterward, confirm that Read-Only API is still on, then run `connect.py` again.
+Gateway's settings live in the `gateway-settings` Docker volume, so they carry
+over. Afterward, confirm that Read-Only API is still on, then run `connect.py`
+again.
 
 ## Safety
 
-This setup is for paper trading. `READ_ONLY_API=yes` blocks orders through the
-API, so leave it on until you intend to test paper orders. This project is for
-education and isn't investment advice.
+This setup is for paper trading, and `compose.yml` fixes `TRADING_MODE` to
+`paper`. `READ_ONLY_API=yes` blocks orders through the API, so leave it on until
+you intend to test paper orders. This project is for education and isn't
+investment advice.
 
 Licensed under the [MIT License](LICENSE).

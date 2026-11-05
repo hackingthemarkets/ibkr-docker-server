@@ -4,25 +4,46 @@ services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:10.50.1f
     restart: unless-stopped
+
     environment:
-      TWS_USERID: ${TWS_USERID}
+      TWS_USERID: ${TWS_USERID:?Set TWS_USERID in .env}
       TWS_PASSWORD_FILE: /run/secrets/tws_password
       VNC_SERVER_PASSWORD_FILE: /run/secrets/vnc_password
-      TRADING_MODE: ${TRADING_MODE:-paper}
+
+      TRADING_MODE: paper
       READ_ONLY_API: ${READ_ONLY_API:-yes}
-      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
-      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
-      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:59 PM}
-      TIME_ZONE: ${TIME_ZONE:-America/New_York}
-    ports:
-      - "127.0.0.1:4002:4004"
-      - "127.0.0.1:5900:5900"
+      TWS_ACCEPT_INCOMING: accept
+      ALLOW_BLIND_TRADING: "no"
+
+      TIME_ZONE: America/New_York
+      AUTO_RESTART_TIME: "11:59 PM"
+      TWOFA_TIMEOUT_ACTION: restart
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
+
+      TWS_SETTINGS_PATH: /home/ibgateway/tws_settings
+
     secrets:
       - tws_password
       - vnc_password
+
+    volumes:
+      - gateway-settings:/home/ibgateway/tws_settings
+
+    ports:
+      - "127.0.0.1:4002:4004"
+      - "127.0.0.1:5900:5900"
+
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 secrets:
   tws_password:
     file: ./secrets/tws_password.txt
   vnc_password:
     file: ./secrets/vnc_password.txt
+
+volumes:
+  gateway-settings:
