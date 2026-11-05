@@ -11,7 +11,7 @@ services:
       VNC_SERVER_PASSWORD_FILE: /run/secrets/vnc_password
 
       TRADING_MODE: paper
-      READ_ONLY_API: ${READ_ONLY_API:-yes}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
       TWS_ACCEPT_INCOMING: accept
       ALLOW_BLIND_TRADING: "no"
 

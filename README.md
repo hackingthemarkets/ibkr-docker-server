@@ -120,14 +120,14 @@ sudo docker compose up -d
 ```
 
 Gateway's settings live in the `gateway-settings` Docker volume, so they carry
-over. Afterward, confirm that Read-Only API is still on, then run `connect.py`
-again.
+over. Afterward, run `connect.py` again.
 
 ## Safety
 
 This setup is for paper trading, and `compose.yml` fixes `TRADING_MODE` to
-`paper`. `READ_ONLY_API=yes` blocks orders through the API, so leave it on until
-you intend to test paper orders. This project is for education and isn't
-investment advice.
+`paper`. The API accepts paper orders, because `READ_ONLY_API` is set to `no` in
+`.env`. Set it to `yes` and recreate the container if you want to block orders.
+The API port is only reachable from the server, so anything running there can
+place paper orders. This project is for education and isn't investment advice.
 
 Licensed under the [MIT License](LICENSE).
