@@ -15,6 +15,8 @@ be open to the internet.
 | `.env.example` | Template for the non-secret settings |
 | `connect.py` | Tests the API connection |
 | `quote.py` | Tests real-time market data |
+| `scripts/gateway_watchdog.py` | Checks Gateway and restarts it when it's stuck |
+| `deploy/gateway-watchdog/` | Installs the watchdog as a system service |
 
 ## Start Gateway on the server
 
@@ -104,6 +106,41 @@ $env:IBKR_PORT = "14002"
 ```
 
 To test paper TWS on your own computer instead, set `IBKR_PORT` to `7497`.
+
+## Keep Gateway healthy
+
+A running container doesn't mean Gateway is usable. The watchdog connects
+through the API once a minute, and it checks that it can resolve a contract and
+read account data. After repeated failures, it restarts Gateway, with limits so
+that it can't restart in an endless loop.
+
+Test one probe first. It doesn't change anything:
+
+```bash
+.venv/bin/python scripts/gateway_watchdog.py --probe-only
+```
+
+Then install the service:
+
+```bash
+sudo deploy/gateway-watchdog/install.sh
+sudo systemctl status ibkr-gateway-watchdog
+sudo journalctl -u ibkr-gateway-watchdog -f
+```
+
+The installer adds a sudo rule that lets your user run one fixed restart script
+and nothing else. Settings are in `/etc/default/ibkr-gateway-watchdog`. After
+changing them, run `sudo systemctl restart ibkr-gateway-watchdog`.
+
+The watchdog can't complete a login or 2FA prompt for you. If Gateway is waiting
+for one, open it over VNC.
+
+To run the tests:
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
+```
 
 ## Upgrade Gateway
 

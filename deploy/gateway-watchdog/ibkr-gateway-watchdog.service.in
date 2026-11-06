@@ -1,0 +1,22 @@
+[Unit]
+Description=IBKR Gateway API watchdog
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+User=@WATCHDOG_USER@
+Group=@WATCHDOG_GROUP@
+WorkingDirectory=@REPOSITORY_ROOT@
+Environment=PYTHONUNBUFFERED=1
+Environment=IBKR_WATCHDOG_STATE_PATH=/var/lib/ibkr-gateway-watchdog/state.json
+EnvironmentFile=-/etc/default/ibkr-gateway-watchdog
+ExecStart=@PYTHON@ @REPOSITORY_ROOT@/scripts/gateway_watchdog.py
+Restart=always
+RestartSec=10
+StateDirectory=ibkr-gateway-watchdog
+StateDirectoryMode=0750
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
