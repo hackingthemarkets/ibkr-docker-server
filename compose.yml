@@ -1,9 +1,21 @@
 name: ibkr-paper
 
 services:
+  # Docker creates the settings volume as root, but Gateway runs as user 1000.
+  fix-settings-permissions:
+    image: alpine:3.20
+    user: "0"
+    command: chown -R 1000:1000 /settings
+    volumes:
+      - gateway-settings:/settings
+    restart: "no"
+
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:10.50.1f
     restart: unless-stopped
+    depends_on:
+      fix-settings-permissions:
+        condition: service_completed_successfully
 
     environment:
       TWS_USERID: ${TWS_USERID:?Set TWS_USERID in .env}
