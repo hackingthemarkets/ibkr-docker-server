@@ -75,11 +75,11 @@ python3 -m venv .venv
 
 On Windows, the Python path is `.venv\Scripts\python`.
 
-**On the server**, Gateway is on port 4002:
+**On the server**, the scripts connect to Gateway on port 4002 by default:
 
 ```bash
-IBKR_PORT=4002 .venv/bin/python connect.py
-IBKR_PORT=4002 .venv/bin/python quote.py
+.venv/bin/python connect.py
+.venv/bin/python quote.py
 ```
 
 **From your own computer**, open a second tunnel and leave it running:
@@ -103,7 +103,7 @@ $env:IBKR_PORT = "14002"
 .venv\Scripts\python quote.py
 ```
 
-Both scripts default to port 7497 for paper TWS on your own computer.
+To test paper TWS on your own computer instead, set `IBKR_PORT` to `7497`.
 
 ## Upgrade Gateway
 

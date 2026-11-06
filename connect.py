@@ -1,9 +1,9 @@
 """Complete one read-only API handshake with TWS or IB Gateway.
 
 Usage:
-    python connect.py                 # local paper TWS (port 7497)
-    IBKR_PORT=4002 python connect.py  # Gateway, run on the server
+    python connect.py                 # Gateway, run on the server (port 4002)
     IBKR_PORT=14002 python connect.py # server Gateway through a tunnel
+    IBKR_PORT=7497 python connect.py  # local paper TWS
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import os
 from ib_async import IB, StartupFetchNONE
 
 HOST = os.getenv("IBKR_HOST", "127.0.0.1")
-PORT = int(os.getenv("IBKR_PORT", "7497"))
+PORT = int(os.getenv("IBKR_PORT", "4002"))
 CLIENT_ID = 101
 
 

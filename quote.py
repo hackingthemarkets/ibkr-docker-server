@@ -1,9 +1,9 @@
 """Check that your paper login receives real-time US stock quotes.
 
 Usage:
-    python quote.py                 # AAPL from local paper TWS
-    IBKR_PORT=4002 python quote.py  # Gateway, run on the server
+    python quote.py                 # AAPL from Gateway, run on the server (port 4002)
     IBKR_PORT=14002 python quote.py # server Gateway through a tunnel
+    IBKR_PORT=7497 python quote.py  # local paper TWS
     QUOTE_SYMBOL=MSFT python quote.py # another US stock
 """
 
@@ -14,7 +14,7 @@ import os
 from ib_async import IB, StartupFetchNONE, Stock
 
 HOST = os.getenv("IBKR_HOST", "127.0.0.1")
-PORT = int(os.getenv("IBKR_PORT", "7497"))
+PORT = int(os.getenv("IBKR_PORT", "4002"))
 CLIENT_ID = 102
 SYMBOL = os.getenv("QUOTE_SYMBOL", "AAPL")
 WAIT_SECONDS = 10
