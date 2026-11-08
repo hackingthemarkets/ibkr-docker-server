@@ -15,7 +15,15 @@ watchdog_group=$(id -gn "${watchdog_user}")
 
 script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd "${script_directory}/../.." && pwd)
-python=${IBKR_WATCHDOG_PYTHON:-${repository_root}/.venv/bin/python}
+if [[ -n ${IBKR_WATCHDOG_PYTHON:-} ]]; then
+    python=${IBKR_WATCHDOG_PYTHON}
+elif [[ -x ${repository_root}/.venv/bin/python ]]; then
+    python=${repository_root}/.venv/bin/python
+elif [[ -x ${repository_root}/venv/bin/python ]]; then
+    python=${repository_root}/venv/bin/python
+else
+    python=${repository_root}/.venv/bin/python
+fi
 docker=${IBKR_DOCKER:-/usr/bin/docker}
 
 for required in \
