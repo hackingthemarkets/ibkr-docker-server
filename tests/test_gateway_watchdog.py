@@ -1,4 +1,5 @@
-from datetime import UTC, datetime, time, timedelta
+import sys
+from datetime import UTC, datetime, time
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -7,10 +8,12 @@ import pytest
 
 from scripts.gateway_watchdog import (
     GatewayProbe,
+    GatewayRestarter,
+    ProbeResult,
+    Watchdog,
     WatchdogConfig,
     WatchdogState,
     is_within_window,
-    recent_restart_attempts,
     restart_decision,
 )
 
@@ -23,12 +26,9 @@ def configuration(tmp_path: Path, **overrides) -> WatchdogConfig:
         "probe_interval_seconds": 60,
         "probe_timeout_seconds": 10,
         "failure_threshold": 5,
-        "maintenance_failure_threshold": 20,
         "maintenance_start": time(23, 50),
-        "maintenance_end": time(0, 20),
-        "restart_cooldown_seconds": 300,
-        "restart_window_seconds": 1800,
-        "maximum_restarts_per_window": 2,
+        "maintenance_end": time(2, 5),
+        "restart_command_timeout_seconds": 60,
         "recovery_timeout_seconds": 180,
         "recovery_probe_interval_seconds": 10,
         "state_path": tmp_path / "state.json",
@@ -48,12 +48,12 @@ def test_maintenance_window_spans_midnight():
     assert is_within_window(
         datetime(2026, 9, 9, 0, 10, tzinfo=ZoneInfo("America/New_York")),
         time(23, 50),
-        time(0, 20),
+        time(2, 5),
     )
     assert not is_within_window(
-        datetime(2026, 9, 9, 0, 21, tzinfo=ZoneInfo("America/New_York")),
+        datetime(2026, 9, 9, 2, 6, tzinfo=ZoneInfo("America/New_York")),
         time(23, 50),
-        time(0, 20),
+        time(2, 5),
     )
 
 
@@ -68,60 +68,31 @@ def test_normal_failures_restart_at_threshold(tmp_path):
     assert not decision.urgent
 
 
-def test_maintenance_uses_longer_failure_threshold(tmp_path):
+def test_maintenance_suppresses_restart_even_after_many_failures(tmp_path):
     config = configuration(tmp_path)
-    state = WatchdogState(consecutive_failures=5)
+    state = WatchdogState(consecutive_failures=100)
     now = datetime(2026, 9, 9, 4, 0, tzinfo=UTC)  # Midnight Eastern.
 
     decision = restart_decision(config, state, now)
 
     assert not decision.should_restart
-    assert "5/20" in decision.reason
+    assert decision.status == "MAINTENANCE"
+    assert "suppressed" in decision.reason
 
 
-def test_restart_cooldown_prevents_an_immediate_second_attempt(tmp_path):
+def test_one_restart_attempt_locks_out_the_rest_of_the_incident(tmp_path):
     config = configuration(tmp_path)
     now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
     state = WatchdogState(
         consecutive_failures=8,
-        restart_attempts=[(now - timedelta(seconds=60)).isoformat()],
-    )
-
-    decision = restart_decision(config, state, now)
-
-    assert not decision.should_restart
-    assert "cooldown" in decision.reason
-
-
-def test_restart_limit_requires_manual_attention(tmp_path):
-    config = configuration(tmp_path)
-    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
-    state = WatchdogState(
-        consecutive_failures=10,
-        restart_attempts=[
-            (now - timedelta(minutes=20)).isoformat(),
-            (now - timedelta(minutes=10)).isoformat(),
-        ],
+        automatic_restart_attempted=True,
     )
 
     decision = restart_decision(config, state, now)
 
     assert not decision.should_restart
     assert decision.urgent
-
-
-def test_old_restart_attempts_are_pruned():
-    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
-    state = WatchdogState(
-        restart_attempts=[
-            (now - timedelta(hours=1)).isoformat(),
-            (now - timedelta(minutes=5)).isoformat(),
-        ]
-    )
-
-    attempts = recent_restart_attempts(state, now, window_seconds=1800)
-
-    assert attempts == [(now - timedelta(minutes=5)).isoformat()]
+    assert decision.status == "OPERATOR_REQUIRED"
 
 
 class HealthyIB:
@@ -140,11 +111,7 @@ class HealthyIB:
         return datetime(2026, 9, 10, 13, 0, tzinfo=UTC)
 
     async def reqContractDetailsAsync(self, contract):
-        return [
-            SimpleNamespace(
-                contract=SimpleNamespace(conId=265598, secType="STK")
-            )
-        ]
+        return [SimpleNamespace(contract=SimpleNamespace(conId=265598, secType="STK"))]
 
     def managedAccounts(self):
         return ["DU12345"]
@@ -189,3 +156,76 @@ async def test_gateway_probe_rejects_partial_api_health(tmp_path):
     assert not result.healthy
     assert "contract-details channel is stuck" in result.detail
     assert not ib.connected
+
+
+class FixedProbe:
+    def __init__(self, result: ProbeResult):
+        self.result = result
+
+    async def check(self) -> ProbeResult:
+        return self.result
+
+    def disconnect(self) -> None:
+        pass
+
+
+class FixedRestarter:
+    def __init__(self, result: tuple[bool, str]):
+        self.result = result
+        self.calls = 0
+
+    async def restart(self) -> tuple[bool, str]:
+        self.calls += 1
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_healthy_probe_clears_incident_lockout(tmp_path):
+    restarter = FixedRestarter((True, "unused"))
+    watchdog = Watchdog(
+        configuration(tmp_path),
+        FixedProbe(ProbeResult(True, "all APIs healthy")),
+        restarter,
+    )
+    watchdog.state = WatchdogState(
+        status="OPERATOR_REQUIRED",
+        consecutive_failures=10,
+        automatic_restart_attempted=True,
+        operator_required=True,
+    )
+
+    assert await watchdog.run_cycle()
+    assert watchdog.state.status == "HEALTHY"
+    assert watchdog.state.consecutive_failures == 0
+    assert not watchdog.state.automatic_restart_attempted
+    assert not watchdog.state.operator_required
+    assert restarter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_requires_an_operator(tmp_path):
+    restarter = FixedRestarter((False, "Docker is unavailable"))
+    watchdog = Watchdog(
+        configuration(tmp_path, failure_threshold=1),
+        FixedProbe(ProbeResult(False, "API unavailable")),
+        restarter,
+    )
+
+    assert not await watchdog.run_cycle()
+    assert watchdog.state.status == "OPERATOR_REQUIRED"
+    assert watchdog.state.automatic_restart_attempted
+    assert watchdog.state.operator_required
+    assert restarter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_command_has_a_timeout():
+    restarter = GatewayRestarter(
+        (sys.executable, "-c", "import time; time.sleep(5)"),
+        timeout_seconds=1,
+    )
+
+    restarted, detail = await restarter.restart()
+
+    assert not restarted
+    assert "timed out" in detail

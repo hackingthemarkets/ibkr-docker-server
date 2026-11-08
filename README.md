@@ -111,8 +111,16 @@ To test paper TWS on your own computer instead, set `IBKR_PORT` to `7497`.
 
 A running container doesn't mean Gateway is usable. The watchdog connects
 through the API once a minute, and it checks that it can resolve a contract and
-read account data. After repeated failures, it restarts Gateway, with limits so
-that it can't restart in an endless loop.
+read account data. After five consecutive failures outside scheduled
+maintenance, it makes one automatic restart attempt. If Gateway still does not
+recover, it stops restarting and records that an operator is required.
+
+IBKR publishes a [nightly North American reset
+window](https://ndcdyn.interactivebrokers.com/en/software/systemStatus.php), and
+its Saturday maintenance can run later. From 11:50 PM through 2:05 AM Eastern,
+the watchdog continues recording health but deliberately suppresses automatic
+restarts. The window can be changed in
+`/etc/default/ibkr-gateway-watchdog`.
 
 Test one probe first. It doesn't change anything:
 
@@ -128,12 +136,36 @@ sudo systemctl status ibkr-gateway-watchdog
 sudo journalctl -u ibkr-gateway-watchdog -f
 ```
 
-The installer adds a sudo rule that lets your user run one fixed restart script
-and nothing else. Settings are in `/etc/default/ibkr-gateway-watchdog`. After
-changing them, run `sudo systemctl restart ibkr-gateway-watchdog`.
+The installer finds the existing Gateway container and bakes its exact name into
+a root-owned restart script. Its sudo rule lets your user run that fixed script
+without granting general Docker access. Settings are in
+`/etc/default/ibkr-gateway-watchdog`. After changing them, run:
+
+```bash
+sudo systemctl restart ibkr-gateway-watchdog
+```
+
+The current machine-readable status is stored at
+`/var/lib/ibkr-gateway-watchdog/state.json`:
+
+```bash
+sudo cat /var/lib/ibkr-gateway-watchdog/state.json
+```
+
+The status moves through `HEALTHY`, `DEGRADED`, `MAINTENANCE`, `RESTARTING` and
+`OPERATOR_REQUIRED`. A successful probe begins a new incident and permits one
+future automatic restart.
 
 The watchdog can't complete a login or 2FA prompt for you. If Gateway is waiting
-for one, open it over VNC.
+for one, or another login is competing for the session, open it over VNC. IBKR
+may also require [manual authentication after its weekly Sunday security
+reset](https://www.ibkrguides.com/traderworkstation/auto-restart-considerations.htm).
+Fix the login or manually restart the fixed container; the next successful
+probe clears `OPERATOR_REQUIRED`:
+
+```bash
+sudo /usr/local/sbin/restart-ibkr-gateway
+```
 
 To run the tests:
 

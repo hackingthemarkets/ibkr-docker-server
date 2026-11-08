@@ -13,14 +13,13 @@ import json
 import logging
 import os
 import shlex
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, time, timedelta
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from ib_async import IB, StartupFetchNONE, Stock
-
 
 LOGGER = logging.getLogger("ibkr_gateway_watchdog")
 KNOWN_CONTRACT = Stock("AAPL", "SMART", "USD", primaryExchange="NASDAQ")
@@ -48,12 +47,9 @@ class WatchdogConfig:
     probe_interval_seconds: int
     probe_timeout_seconds: int
     failure_threshold: int
-    maintenance_failure_threshold: int
     maintenance_start: time
     maintenance_end: time
-    restart_cooldown_seconds: int
-    restart_window_seconds: int
-    maximum_restarts_per_window: int
+    restart_command_timeout_seconds: int
     recovery_timeout_seconds: int
     recovery_probe_interval_seconds: int
     state_path: Path
@@ -74,11 +70,7 @@ class WatchdogConfig:
             raise ValueError("IBKR_WATCHDOG_RESTART_COMMAND cannot be empty")
 
         default_state = (
-            Path.home()
-            / ".local"
-            / "state"
-            / "ibkr-gateway-watchdog"
-            / "state.json"
+            Path.home() / ".local" / "state" / "ibkr-gateway-watchdog" / "state.json"
         )
         return cls(
             host=os.getenv("IBKR_WATCHDOG_HOST", "127.0.0.1"),
@@ -90,26 +82,11 @@ class WatchdogConfig:
             probe_timeout_seconds=positive_int(
                 "IBKR_WATCHDOG_PROBE_TIMEOUT_SECONDS", 10
             ),
-            failure_threshold=positive_int(
-                "IBKR_WATCHDOG_FAILURE_THRESHOLD", 5
-            ),
-            maintenance_failure_threshold=positive_int(
-                "IBKR_WATCHDOG_MAINTENANCE_FAILURE_THRESHOLD", 20
-            ),
-            maintenance_start=clock_time(
-                "IBKR_WATCHDOG_MAINTENANCE_START", "23:50"
-            ),
-            maintenance_end=clock_time(
-                "IBKR_WATCHDOG_MAINTENANCE_END", "00:20"
-            ),
-            restart_cooldown_seconds=positive_int(
-                "IBKR_WATCHDOG_RESTART_COOLDOWN_SECONDS", 300
-            ),
-            restart_window_seconds=positive_int(
-                "IBKR_WATCHDOG_RESTART_WINDOW_SECONDS", 1800
-            ),
-            maximum_restarts_per_window=positive_int(
-                "IBKR_WATCHDOG_MAXIMUM_RESTARTS_PER_WINDOW", 2
+            failure_threshold=positive_int("IBKR_WATCHDOG_FAILURE_THRESHOLD", 5),
+            maintenance_start=clock_time("IBKR_WATCHDOG_MAINTENANCE_START", "23:50"),
+            maintenance_end=clock_time("IBKR_WATCHDOG_MAINTENANCE_END", "02:05"),
+            restart_command_timeout_seconds=positive_int(
+                "IBKR_WATCHDOG_RESTART_COMMAND_TIMEOUT_SECONDS", 60
             ),
             recovery_timeout_seconds=positive_int(
                 "IBKR_WATCHDOG_RECOVERY_TIMEOUT_SECONDS", 180
@@ -121,16 +98,16 @@ class WatchdogConfig:
                 os.getenv("IBKR_WATCHDOG_STATE_PATH", str(default_state))
             ).expanduser(),
             restart_command=restart_command,
-            timezone=ZoneInfo(
-                os.getenv("IBKR_WATCHDOG_TIME_ZONE", "America/New_York")
-            ),
+            timezone=ZoneInfo(os.getenv("IBKR_WATCHDOG_TIME_ZONE", "America/New_York")),
         )
 
 
 @dataclass(slots=True)
 class WatchdogState:
+    status: str = "STARTING"
     consecutive_failures: int = 0
-    restart_attempts: list[str] = field(default_factory=list)
+    automatic_restart_attempted: bool = False
+    operator_required: bool = False
     last_check_at: str | None = None
     last_healthy_at: str | None = None
     last_error: str | None = None
@@ -243,7 +220,7 @@ class GatewayProbe:
                     f"{len(accounts)} managed account(s)"
                 ),
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - every API failure is unhealthy.
             self.disconnect()
             return ProbeResult(False, f"{type(error).__name__}: {error}")
 
@@ -253,8 +230,9 @@ class GatewayProbe:
 
 
 class GatewayRestarter:
-    def __init__(self, command: tuple[str, ...]):
+    def __init__(self, command: tuple[str, ...], timeout_seconds: int):
         self.command = command
+        self.timeout_seconds = timeout_seconds
 
     async def restart(self) -> tuple[bool, str]:
         try:
@@ -263,8 +241,21 @@ class GatewayRestarter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            output, _ = await process.communicate()
-        except Exception as error:
+            try:
+                output, _ = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=self.timeout_seconds,
+                )
+            except TimeoutError:
+                process.kill()
+                output, _ = await process.communicate()
+                detail = output.decode("utf-8", errors="replace").strip()
+                suffix = f": {detail}" if detail else ""
+                return False, (
+                    f"restart command timed out after {self.timeout_seconds} "
+                    f"seconds{suffix}"
+                )
+        except Exception as error:  # noqa: BLE001 - report any restart failure.
             return False, f"could not execute restart command: {error}"
 
         detail = output.decode("utf-8", errors="replace").strip()
@@ -280,35 +271,11 @@ def is_within_window(moment: datetime, start: time, end: time) -> bool:
     return current >= start or current < end
 
 
-def parsed_timestamp(value: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def recent_restart_attempts(
-    state: WatchdogState,
-    now: datetime,
-    window_seconds: int,
-) -> list[str]:
-    cutoff = now.astimezone(UTC) - timedelta(seconds=window_seconds)
-    recent = []
-    for value in state.restart_attempts:
-        parsed = parsed_timestamp(value)
-        if parsed is not None and parsed >= cutoff:
-            recent.append(parsed.isoformat())
-    state.restart_attempts = recent
-    return recent
-
-
 @dataclass(frozen=True, slots=True)
 class RestartDecision:
     should_restart: bool
     reason: str
+    status: str
     urgent: bool = False
 
 
@@ -323,42 +290,33 @@ def restart_decision(
         config.maintenance_start,
         config.maintenance_end,
     )
-    threshold = (
-        config.maintenance_failure_threshold
-        if maintenance
-        else config.failure_threshold
-    )
-    if state.consecutive_failures < threshold:
-        label = "maintenance" if maintenance else "normal"
+    if maintenance:
         return RestartDecision(
             False,
-            f"failure {state.consecutive_failures}/{threshold} ({label} threshold)",
+            "scheduled maintenance window; automatic restart suppressed",
+            "MAINTENANCE",
         )
 
-    attempts = recent_restart_attempts(
-        state,
-        now,
-        config.restart_window_seconds,
-    )
-    if len(attempts) >= config.maximum_restarts_per_window:
+    if state.operator_required or state.automatic_restart_attempted:
         return RestartDecision(
             False,
-            "automatic restart limit reached; manual attention required",
+            "automatic restart already attempted; manual attention required",
+            "OPERATOR_REQUIRED",
             urgent=True,
         )
 
-    if attempts:
-        last_attempt = parsed_timestamp(attempts[-1])
-        assert last_attempt is not None
-        age = (now.astimezone(UTC) - last_attempt).total_seconds()
-        if age < config.restart_cooldown_seconds:
-            remaining = config.restart_cooldown_seconds - age
-            return RestartDecision(
-                False,
-                f"restart cooldown active for another {remaining:.0f} seconds",
-            )
+    if state.consecutive_failures < config.failure_threshold:
+        return RestartDecision(
+            False,
+            f"failure {state.consecutive_failures}/{config.failure_threshold}",
+            "DEGRADED",
+        )
 
-    return RestartDecision(True, f"Gateway failed {state.consecutive_failures} probes")
+    return RestartDecision(
+        True,
+        f"Gateway failed {state.consecutive_failures} probes",
+        "RESTARTING",
+    )
 
 
 class Watchdog:
@@ -402,27 +360,44 @@ class Watchdog:
             else:
                 LOGGER.debug("Gateway healthy: %s", result.detail)
             self.state.consecutive_failures = 0
+            self.state.status = "HEALTHY"
+            self.state.automatic_restart_attempted = False
+            self.state.operator_required = False
             self.state.last_healthy_at = checked_at.isoformat()
             self.state.last_error = None
             self.save()
             return True
 
-        self.state.consecutive_failures += 1
         self.state.last_error = result.detail
+        local_now = checked_at.astimezone(self.config.timezone)
+        maintenance = is_within_window(
+            local_now,
+            self.config.maintenance_start,
+            self.config.maintenance_end,
+        )
+        if maintenance:
+            # Expected reset failures should not contribute to a restart as soon
+            # as the maintenance window ends.
+            self.state.consecutive_failures = 0
+        else:
+            self.state.consecutive_failures += 1
         decision = restart_decision(self.config, self.state, checked_at)
+        self.state.status = decision.status
         log = LOGGER.critical if decision.urgent else LOGGER.warning
         log("Gateway probe failed: %s; %s", result.detail, decision.reason)
         self.save()
         if not decision.should_restart:
             return False
 
-        self.state.restart_attempts.append(checked_at.isoformat())
+        self.state.automatic_restart_attempted = True
         self.state.last_restart_at = checked_at.isoformat()
         self.state.last_restart_outcome = "STARTED"
         self.save()
         LOGGER.error("Restarting the IB Gateway container")
         restarted, restart_detail = await self.restarter.restart()
         if not restarted:
+            self.state.status = "OPERATOR_REQUIRED"
+            self.state.operator_required = True
             self.state.last_restart_outcome = "COMMAND_FAILED"
             self.state.last_error = restart_detail
             self.save()
@@ -433,6 +408,8 @@ class Watchdog:
         self.probe.disconnect()
         recovery = await self.wait_for_recovery()
         if not recovery.healthy:
+            self.state.status = "OPERATOR_REQUIRED"
+            self.state.operator_required = True
             self.state.last_restart_outcome = "STILL_UNHEALTHY"
             self.state.last_error = recovery.detail
             self.save()
@@ -445,6 +422,9 @@ class Watchdog:
 
         recovered_at = datetime.now(UTC)
         self.state.consecutive_failures = 0
+        self.state.status = "HEALTHY"
+        self.state.automatic_restart_attempted = False
+        self.state.operator_required = False
         self.state.last_check_at = recovered_at.isoformat()
         self.state.last_healthy_at = recovered_at.isoformat()
         self.state.last_error = None
@@ -500,7 +480,10 @@ async def async_main(args: argparse.Namespace) -> int:
         watchdog = Watchdog(
             config,
             probe,
-            GatewayRestarter(config.restart_command),
+            GatewayRestarter(
+                config.restart_command,
+                config.restart_command_timeout_seconds,
+            ),
         )
         if args.once:
             return 0 if await watchdog.run_cycle() else 1

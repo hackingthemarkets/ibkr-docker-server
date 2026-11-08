@@ -16,22 +16,7 @@ watchdog_group=$(id -gn "${watchdog_user}")
 script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd "${script_directory}/../.." && pwd)
 python=${IBKR_WATCHDOG_PYTHON:-${repository_root}/.venv/bin/python}
-compose_directory=${IBKR_COMPOSE_DIRECTORY:-/home/${watchdog_user}/ibkr-stack}
-compose_service=${IBKR_COMPOSE_SERVICE:-ib-gateway}
 docker=${IBKR_DOCKER:-/usr/bin/docker}
-
-if [[ -n ${IBKR_COMPOSE_FILE:-} ]]; then
-    compose_file=${IBKR_COMPOSE_FILE}
-elif [[ -f ${compose_directory}/compose.yml ]]; then
-    compose_file=${compose_directory}/compose.yml
-elif [[ -f ${compose_directory}/compose.yaml ]]; then
-    compose_file=${compose_directory}/compose.yaml
-elif [[ -f ${compose_directory}/docker-compose.yml ]]; then
-    compose_file=${compose_directory}/docker-compose.yml
-else
-    echo "Could not locate a Compose file in ${compose_directory}." >&2
-    exit 1
-fi
 
 for required in "${python}" "${docker}" "${repository_root}/scripts/gateway_watchdog.py"; do
     if [[ ! -e ${required} ]]; then
@@ -39,6 +24,26 @@ for required in "${python}" "${docker}" "${repository_root}/scripts/gateway_watc
         exit 1
     fi
 done
+
+container_name=${IBKR_GATEWAY_CONTAINER_NAME:-}
+if [[ -z ${container_name} ]]; then
+    mapfile -t gateway_containers < <(
+        "${docker}" ps --all \
+            --filter label=com.docker.compose.project=ibkr-paper \
+            --filter label=com.docker.compose.service=ib-gateway \
+            --format '{{.Names}}'
+    )
+    if [[ ${#gateway_containers[@]} -ne 1 ]]; then
+        echo "Expected exactly one ibkr-paper Gateway container; found ${#gateway_containers[@]}." >&2
+        echo "Start the Compose stack first, or set IBKR_GATEWAY_CONTAINER_NAME." >&2
+        exit 1
+    fi
+    container_name=${gateway_containers[0]}
+fi
+if [[ ! ${container_name} =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    echo "Invalid Gateway container name: ${container_name}" >&2
+    exit 1
+fi
 
 temporary_directory=$(mktemp -d)
 trap 'rm -rf "${temporary_directory}"' EXIT
@@ -50,9 +55,7 @@ render() {
         -e "s|@REPOSITORY_ROOT@|${repository_root}|g" \
         -e "s|@PYTHON@|${python}|g" \
         -e "s|@DOCKER@|${docker}|g" \
-        -e "s|@COMPOSE_DIRECTORY@|${compose_directory}|g" \
-        -e "s|@COMPOSE_FILE@|${compose_file}|g" \
-        -e "s|@COMPOSE_SERVICE@|${compose_service}|g" \
+        -e "s|@CONTAINER_NAME@|${container_name}|g" \
         "$1" > "$2"
 }
 
