@@ -113,7 +113,9 @@ A running container doesn't mean Gateway is usable. The watchdog connects
 through the API once a minute, and it checks that it can resolve a contract and
 read account data. After five consecutive failures outside scheduled
 maintenance, it makes one automatic restart attempt. If Gateway still does not
-recover, it stops restarting and records that an operator is required.
+recover, it stops restarting and records that an operator is required. Even
+after a successful recovery, it permits no more than one automatic restart in
+24 hours.
 
 IBKR publishes a [nightly North American reset
 window](https://ndcdyn.interactivebrokers.com/en/software/systemStatus.php), and
@@ -121,6 +123,10 @@ its Saturday maintenance can run later. From 11:50 PM through 2:05 AM Eastern,
 the watchdog continues recording health but deliberately suppresses automatic
 restarts. The window can be changed in
 `/etc/default/ibkr-gateway-watchdog`.
+
+Saturday is treated as a quiet day, and automatic recovery resumes at 8:00 AM
+Eastern on Sunday. The watchdog still records probe results, but it does not
+restart Gateway or repeat urgent log messages while the market is closed.
 
 Test one probe first. It doesn't change anything:
 
@@ -152,9 +158,13 @@ The current machine-readable status is stored at
 sudo cat /var/lib/ibkr-gateway-watchdog/state.json
 ```
 
-The status moves through `HEALTHY`, `DEGRADED`, `MAINTENANCE`, `RESTARTING` and
-`OPERATOR_REQUIRED`. A successful probe begins a new incident and permits one
-future automatic restart.
+The status moves through `HEALTHY`, `DEGRADED`, `MAINTENANCE`, `WEEKEND_QUIET`,
+`RESTARTING` and `OPERATOR_REQUIRED`. A successful probe begins a new incident;
+the separate 24-hour restart cap remains in effect.
+
+This service watches Gateway only. It does not monitor a strategy process or
+send notifications; those checks belong in a separate trading-readiness and
+alerting layer.
 
 The watchdog can't complete a login or 2FA prompt for you. If Gateway is waiting
 for one, or another login is competing for the session, open it over VNC. IBKR

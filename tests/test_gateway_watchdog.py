@@ -13,6 +13,7 @@ from scripts.gateway_watchdog import (
     Watchdog,
     WatchdogConfig,
     WatchdogState,
+    is_weekend_quiet,
     is_within_window,
     restart_decision,
 )
@@ -28,6 +29,8 @@ def configuration(tmp_path: Path, **overrides) -> WatchdogConfig:
         "failure_threshold": 5,
         "maintenance_start": time(23, 50),
         "maintenance_end": time(2, 5),
+        "weekend_quiet_end_sunday": time(8),
+        "minimum_automatic_restart_interval_seconds": 86400,
         "restart_command_timeout_seconds": 60,
         "recovery_timeout_seconds": 180,
         "recovery_probe_interval_seconds": 10,
@@ -80,6 +83,23 @@ def test_maintenance_suppresses_restart_even_after_many_failures(tmp_path):
     assert "suppressed" in decision.reason
 
 
+def test_weekend_is_quiet_until_sunday_morning():
+    eastern = ZoneInfo("America/New_York")
+
+    assert is_weekend_quiet(
+        datetime(2026, 9, 12, 12, 0, tzinfo=eastern),
+        time(8),
+    )
+    assert is_weekend_quiet(
+        datetime(2026, 9, 13, 7, 59, tzinfo=eastern),
+        time(8),
+    )
+    assert not is_weekend_quiet(
+        datetime(2026, 9, 13, 8, 0, tzinfo=eastern),
+        time(8),
+    )
+
+
 def test_one_restart_attempt_locks_out_the_rest_of_the_incident(tmp_path):
     config = configuration(tmp_path)
     now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
@@ -93,6 +113,34 @@ def test_one_restart_attempt_locks_out_the_rest_of_the_incident(tmp_path):
     assert not decision.should_restart
     assert decision.urgent
     assert decision.status == "OPERATOR_REQUIRED"
+
+
+def test_successful_restart_still_enforces_daily_cap(tmp_path):
+    config = configuration(tmp_path)
+    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    state = WatchdogState(
+        consecutive_failures=5,
+        last_restart_at=(now.replace(hour=13)).isoformat(),
+    )
+
+    decision = restart_decision(config, state, now)
+
+    assert not decision.should_restart
+    assert decision.urgent
+    assert "cap active" in decision.reason
+
+
+def test_daily_restart_cap_expires(tmp_path):
+    config = configuration(tmp_path)
+    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    state = WatchdogState(
+        consecutive_failures=5,
+        last_restart_at=datetime(2026, 9, 7, 13, 59, tzinfo=UTC).isoformat(),
+    )
+
+    decision = restart_decision(config, state, now)
+
+    assert decision.should_restart
 
 
 class HealthyIB:
@@ -186,6 +234,7 @@ async def test_healthy_probe_clears_incident_lockout(tmp_path):
         configuration(tmp_path),
         FixedProbe(ProbeResult(True, "all APIs healthy")),
         restarter,
+        clock=lambda: datetime(2026, 9, 8, 14, 0, tzinfo=UTC),
     )
     watchdog.state = WatchdogState(
         status="OPERATOR_REQUIRED",
@@ -209,6 +258,7 @@ async def test_failed_restart_requires_an_operator(tmp_path):
         configuration(tmp_path, failure_threshold=1),
         FixedProbe(ProbeResult(False, "API unavailable")),
         restarter,
+        clock=lambda: datetime(2026, 9, 8, 14, 0, tzinfo=UTC),
     )
 
     assert not await watchdog.run_cycle()

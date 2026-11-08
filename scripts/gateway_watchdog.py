@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shlex
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time
 from pathlib import Path
@@ -49,6 +50,8 @@ class WatchdogConfig:
     failure_threshold: int
     maintenance_start: time
     maintenance_end: time
+    weekend_quiet_end_sunday: time
+    minimum_automatic_restart_interval_seconds: int
     restart_command_timeout_seconds: int
     recovery_timeout_seconds: int
     recovery_probe_interval_seconds: int
@@ -85,6 +88,12 @@ class WatchdogConfig:
             failure_threshold=positive_int("IBKR_WATCHDOG_FAILURE_THRESHOLD", 5),
             maintenance_start=clock_time("IBKR_WATCHDOG_MAINTENANCE_START", "23:50"),
             maintenance_end=clock_time("IBKR_WATCHDOG_MAINTENANCE_END", "02:05"),
+            weekend_quiet_end_sunday=clock_time(
+                "IBKR_WATCHDOG_WEEKEND_QUIET_END_SUNDAY", "08:00"
+            ),
+            minimum_automatic_restart_interval_seconds=positive_int(
+                "IBKR_WATCHDOG_MINIMUM_AUTOMATIC_RESTART_INTERVAL_SECONDS", 86400
+            ),
             restart_command_timeout_seconds=positive_int(
                 "IBKR_WATCHDOG_RESTART_COMMAND_TIMEOUT_SECONDS", 60
             ),
@@ -271,6 +280,24 @@ def is_within_window(moment: datetime, start: time, end: time) -> bool:
     return current >= start or current < end
 
 
+def is_weekend_quiet(moment: datetime, sunday_end: time) -> bool:
+    """Suppress automatic recovery all Saturday and early Sunday."""
+    current = moment.timetz().replace(tzinfo=None)
+    return moment.weekday() == 5 or (moment.weekday() == 6 and current < sunday_end)
+
+
+def parsed_timestamp(value: str | None) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value) if value is not None else None
+    except ValueError:
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class RestartDecision:
     should_restart: bool
@@ -297,6 +324,13 @@ def restart_decision(
             "MAINTENANCE",
         )
 
+    if is_weekend_quiet(local_now, config.weekend_quiet_end_sunday):
+        return RestartDecision(
+            False,
+            "weekend quiet period; automatic restart suppressed",
+            "WEEKEND_QUIET",
+        )
+
     if state.operator_required or state.automatic_restart_attempted:
         return RestartDecision(
             False,
@@ -312,6 +346,21 @@ def restart_decision(
             "DEGRADED",
         )
 
+    last_restart = parsed_timestamp(state.last_restart_at)
+    if last_restart is not None:
+        age = (now.astimezone(UTC) - last_restart).total_seconds()
+        if age < config.minimum_automatic_restart_interval_seconds:
+            remaining = config.minimum_automatic_restart_interval_seconds - age
+            return RestartDecision(
+                False,
+                (
+                    "automatic restart cap active for another "
+                    f"{remaining / 3600:.1f} hours; manual attention required"
+                ),
+                "OPERATOR_REQUIRED",
+                urgent=True,
+            )
+
     return RestartDecision(
         True,
         f"Gateway failed {state.consecutive_failures} probes",
@@ -325,10 +374,12 @@ class Watchdog:
         config: WatchdogConfig,
         probe: Probe,
         restarter: GatewayRestarter,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.config = config
         self.probe = probe
         self.restarter = restarter
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.state = WatchdogState.load(config.state_path)
 
     def save(self) -> None:
@@ -346,7 +397,7 @@ class Watchdog:
         return latest
 
     async def run_cycle(self) -> bool:
-        checked_at = datetime.now(UTC)
+        checked_at = self.clock()
         result = await self.probe.check()
         self.state.last_check_at = checked_at.isoformat()
 
@@ -369,21 +420,24 @@ class Watchdog:
             return True
 
         self.state.last_error = result.detail
-        local_now = checked_at.astimezone(self.config.timezone)
-        maintenance = is_within_window(
-            local_now,
-            self.config.maintenance_start,
-            self.config.maintenance_end,
-        )
-        if maintenance:
-            # Expected reset failures should not contribute to a restart as soon
-            # as the maintenance window ends.
-            self.state.consecutive_failures = 0
-        else:
-            self.state.consecutive_failures += 1
+        self.state.consecutive_failures += 1
+        previous_status = self.state.status
         decision = restart_decision(self.config, self.state, checked_at)
+        if decision.status in {"MAINTENANCE", "WEEKEND_QUIET"}:
+            # Expected closed-period failures should not trigger a restart as
+            # soon as automatic recovery becomes active again.
+            self.state.consecutive_failures = 0
+        if decision.urgent:
+            self.state.operator_required = True
         self.state.status = decision.status
-        log = LOGGER.critical if decision.urgent else LOGGER.warning
+        if decision.status in {"MAINTENANCE", "WEEKEND_QUIET"}:
+            log = LOGGER.info if previous_status != decision.status else LOGGER.debug
+        elif decision.urgent:
+            log = (
+                LOGGER.critical if previous_status != decision.status else LOGGER.debug
+            )
+        else:
+            log = LOGGER.warning
         log("Gateway probe failed: %s; %s", result.detail, decision.reason)
         self.save()
         if not decision.should_restart:
@@ -420,7 +474,7 @@ class Watchdog:
             )
             return False
 
-        recovered_at = datetime.now(UTC)
+        recovered_at = self.clock()
         self.state.consecutive_failures = 0
         self.state.status = "HEALTHY"
         self.state.automatic_restart_attempted = False
