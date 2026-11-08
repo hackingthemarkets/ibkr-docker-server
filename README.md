@@ -143,6 +143,10 @@ sudo systemctl status ibkr-gateway-watchdog
 sudo journalctl -u ibkr-gateway-watchdog -f
 ```
 
+The installer automatically recognizes a repository environment named either
+`.venv` or `venv`. Set `IBKR_WATCHDOG_PYTHON` only if you keep Python somewhere
+else.
+
 The installer finds the existing Gateway container and bakes its exact name into
 a root-owned restart script. Its sudo rule lets your user run that fixed script
 without granting general Docker access. Settings are in
