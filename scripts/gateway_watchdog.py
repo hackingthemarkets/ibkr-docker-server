@@ -22,6 +22,11 @@ from zoneinfo import ZoneInfo
 
 from ib_async import IB, StartupFetchNONE, Stock
 
+try:
+    from .watchdog_email import SMTPEmailSender, email_sender_from_environment
+except ImportError:  # Support direct execution: python scripts/gateway_watchdog.py
+    from watchdog_email import SMTPEmailSender, email_sender_from_environment
+
 LOGGER = logging.getLogger("ibkr_gateway_watchdog")
 KNOWN_CONTRACT = Stock("AAPL", "SMART", "USD", primaryExchange="NASDAQ")
 
@@ -122,6 +127,9 @@ class WatchdogState:
     last_error: str | None = None
     last_restart_at: str | None = None
     last_restart_outcome: str | None = None
+    email_recovery_pending: bool = False
+    last_email_kind: str | None = None
+    last_email_at: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> WatchdogState:
@@ -156,6 +164,10 @@ class Probe(Protocol):
     async def check(self) -> ProbeResult: ...
 
     def disconnect(self) -> None: ...
+
+
+class AlertSender(Protocol):
+    async def send(self, subject: str, body: str) -> tuple[bool, str]: ...
 
 
 class GatewayProbe:
@@ -374,16 +386,67 @@ class Watchdog:
         config: WatchdogConfig,
         probe: Probe,
         restarter: GatewayRestarter,
+        alert_sender: AlertSender | None = None,
         clock: Callable[[], datetime] | None = None,
     ):
         self.config = config
         self.probe = probe
         self.restarter = restarter
+        self.alert_sender = alert_sender
         self.clock = clock or (lambda: datetime.now(UTC))
         self.state = WatchdogState.load(config.state_path)
 
     def save(self) -> None:
         self.state.save(self.config.state_path)
+
+    async def send_alert(self, kind: str, subject: str, body: str) -> None:
+        if self.alert_sender is None or self.state.last_email_kind == kind:
+            return
+        sent, detail = await self.alert_sender.send(subject, body)
+        if not sent:
+            LOGGER.warning("Could not send %s email: %s", kind, detail)
+            return
+        self.state.last_email_kind = kind
+        self.state.last_email_at = self.clock().isoformat()
+        self.save()
+        LOGGER.info("Sent %s email: %s", kind, detail)
+
+    async def send_operator_alert(self) -> None:
+        body = "\n".join(
+            (
+                "IBKR Gateway requires attention.",
+                "",
+                f"Status: {self.state.status}",
+                f"Last check: {self.state.last_check_at or 'unknown'}",
+                f"Last error: {self.state.last_error or 'unknown'}",
+                f"Last restart: {self.state.last_restart_at or 'none recorded'}",
+                f"Restart outcome: {self.state.last_restart_outcome or 'none recorded'}",
+                "",
+                "Inspect Gateway over the private VNC tunnel. The watchdog will not",
+                "attempt another automatic restart until Gateway becomes healthy.",
+            )
+        )
+        await self.send_alert(
+            "OPERATOR_REQUIRED",
+            "[IBKR] Gateway requires attention",
+            body,
+        )
+
+    async def send_recovery_alert(self, detail: str) -> None:
+        body = "\n".join(
+            (
+                "IBKR Gateway recovered.",
+                "",
+                f"Recovered at: {self.state.last_healthy_at or 'unknown'}",
+                f"Probe: {detail}",
+                f"Last restart: {self.state.last_restart_at or 'none recorded'}",
+                f"Restart outcome: {self.state.last_restart_outcome or 'none recorded'}",
+            )
+        )
+        await self.send_alert("RECOVERED", "[IBKR] Gateway recovered", body)
+        if self.state.last_email_kind == "RECOVERED":
+            self.state.email_recovery_pending = False
+            self.save()
 
     async def wait_for_recovery(self) -> ProbeResult:
         loop = asyncio.get_running_loop()
@@ -417,6 +480,8 @@ class Watchdog:
             self.state.last_healthy_at = checked_at.isoformat()
             self.state.last_error = None
             self.save()
+            if self.state.email_recovery_pending:
+                await self.send_recovery_alert(result.detail)
             return True
 
         self.state.last_error = result.detail
@@ -428,6 +493,9 @@ class Watchdog:
             # soon as automatic recovery becomes active again.
             self.state.consecutive_failures = 0
         if decision.urgent:
+            if not self.state.email_recovery_pending:
+                self.state.last_email_kind = None
+            self.state.email_recovery_pending = True
             self.state.operator_required = True
         self.state.status = decision.status
         if decision.status in {"MAINTENANCE", "WEEKEND_QUIET"}:
@@ -441,8 +509,13 @@ class Watchdog:
         log("Gateway probe failed: %s; %s", result.detail, decision.reason)
         self.save()
         if not decision.should_restart:
+            if decision.urgent:
+                await self.send_operator_alert()
             return False
 
+        if not self.state.email_recovery_pending:
+            self.state.last_email_kind = None
+        self.state.email_recovery_pending = True
         self.state.automatic_restart_attempted = True
         self.state.last_restart_at = checked_at.isoformat()
         self.state.last_restart_outcome = "STARTED"
@@ -456,6 +529,7 @@ class Watchdog:
             self.state.last_error = restart_detail
             self.save()
             LOGGER.critical("Gateway restart command failed: %s", restart_detail)
+            await self.send_operator_alert()
             return False
 
         LOGGER.info("Gateway restart command completed: %s", restart_detail)
@@ -472,6 +546,7 @@ class Watchdog:
                 self.config.recovery_timeout_seconds,
                 recovery.detail,
             )
+            await self.send_operator_alert()
             return False
 
         recovered_at = self.clock()
@@ -485,6 +560,7 @@ class Watchdog:
         self.state.last_restart_outcome = "RECOVERED"
         self.save()
         LOGGER.info("Gateway recovered after container restart: %s", recovery.detail)
+        await self.send_recovery_alert(recovery.detail)
         return True
 
     async def run_forever(self) -> None:
@@ -531,6 +607,18 @@ async def async_main(args: argparse.Namespace) -> int:
             )
             return 0 if result.healthy else 1
 
+        try:
+            alert_sender: SMTPEmailSender | None = email_sender_from_environment()
+        except ValueError as error:
+            LOGGER.error(
+                "Email alerts are misconfigured; continuing without them: %s", error
+            )
+            alert_sender = None
+        if alert_sender is None:
+            LOGGER.info(
+                "Email alerts are not configured; continuing with journal and state reporting"
+            )
+
         watchdog = Watchdog(
             config,
             probe,
@@ -538,6 +626,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 config.restart_command,
                 config.restart_command_timeout_seconds,
             ),
+            alert_sender=alert_sender,
         )
         if args.once:
             return 0 if await watchdog.run_cycle() else 1

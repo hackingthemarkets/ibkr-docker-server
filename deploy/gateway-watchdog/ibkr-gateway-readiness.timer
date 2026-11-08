@@ -1,0 +1,10 @@
+[Unit]
+Description=Send the weekly IBKR Gateway readiness report
+
+[Timer]
+OnCalendar=Sun *-*-* 09:00:00 America/New_York
+Persistent=true
+Unit=ibkr-gateway-readiness.service
+
+[Install]
+WantedBy=timers.target

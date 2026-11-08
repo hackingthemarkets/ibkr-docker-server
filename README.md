@@ -16,6 +16,7 @@ be open to the internet.
 | `connect.py` | Tests the API connection |
 | `quote.py` | Tests real-time market data |
 | `scripts/gateway_watchdog.py` | Checks Gateway and restarts it when it's stuck |
+| `scripts/gateway_readiness.py` | Prints the Sunday readiness report |
 | `deploy/gateway-watchdog/` | Installs the watchdog as a system service |
 
 ## Start Gateway on the server
@@ -163,8 +164,7 @@ The status moves through `HEALTHY`, `DEGRADED`, `MAINTENANCE`, `WEEKEND_QUIET`,
 the separate 24-hour restart cap remains in effect.
 
 This service watches Gateway only. It does not monitor a strategy process or
-send notifications; those checks belong in a separate trading-readiness and
-alerting layer.
+send strategy alerts; those checks belong in the trading application.
 
 The watchdog can't complete a login or 2FA prompt for you. If Gateway is waiting
 for one, or another login is competing for the session, open it over VNC. IBKR
@@ -175,6 +175,54 @@ probe clears `OPERATOR_REQUIRED`:
 
 ```bash
 sudo /usr/local/sbin/restart-ibkr-gateway
+```
+
+### Optional email alerts
+
+Email is optional. Without it, the watchdog still restarts Gateway, records its
+state and writes to the system journal. When authenticated SMTP is configured,
+it sends one message when Gateway requires an operator and another after
+recovery. A Sunday timer also runs a readiness probe at 9:00 AM Eastern and
+emails the result. The report still runs and is written to the journal when
+email is disabled.
+
+Edit the non-secret settings:
+
+```bash
+sudo nano /etc/default/ibkr-gateway-watchdog
+```
+
+For Mailgun in the US region, the relevant values look like this:
+
+```ini
+IBKR_ALERT_SMTP_HOST=smtp.mailgun.org
+IBKR_ALERT_SMTP_PORT=587
+IBKR_ALERT_SMTP_SECURITY=starttls
+IBKR_ALERT_SMTP_USERNAME=postmaster@mg.example.com
+IBKR_ALERT_FROM=IBKR Server <alerts@mg.example.com>
+IBKR_ALERT_TO=you@example.com
+```
+
+Use `smtp.eu.mailgun.org` for a Mailgun domain in the EU region. Other providers
+work if they offer authenticated SMTP. Put only the SMTP password in the
+protected file created by the installer:
+
+```bash
+sudo nano /etc/ibkr-gateway-watchdog/smtp-password
+sudo systemctl restart ibkr-gateway-watchdog
+```
+
+Test delivery by starting the readiness service immediately:
+
+```bash
+sudo systemctl start ibkr-gateway-readiness.service
+sudo journalctl -u ibkr-gateway-readiness.service -n 50 --no-pager
+```
+
+The scheduled run is visible with:
+
+```bash
+systemctl list-timers ibkr-gateway-readiness.timer
 ```
 
 To run the tests:

@@ -227,6 +227,15 @@ class FixedRestarter:
         return self.result
 
 
+class RecordingAlertSender:
+    def __init__(self):
+        self.messages: list[tuple[str, str]] = []
+
+    async def send(self, subject: str, body: str) -> tuple[bool, str]:
+        self.messages.append((subject, body))
+        return True, "recorded"
+
+
 @pytest.mark.asyncio
 async def test_healthy_probe_clears_incident_lockout(tmp_path):
     restarter = FixedRestarter((True, "unused"))
@@ -254,10 +263,12 @@ async def test_healthy_probe_clears_incident_lockout(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_restart_requires_an_operator(tmp_path):
     restarter = FixedRestarter((False, "Docker is unavailable"))
+    alerts = RecordingAlertSender()
     watchdog = Watchdog(
         configuration(tmp_path, failure_threshold=1),
         FixedProbe(ProbeResult(False, "API unavailable")),
         restarter,
+        alert_sender=alerts,
         clock=lambda: datetime(2026, 9, 8, 14, 0, tzinfo=UTC),
     )
 
@@ -266,6 +277,36 @@ async def test_failed_restart_requires_an_operator(tmp_path):
     assert watchdog.state.automatic_restart_attempted
     assert watchdog.state.operator_required
     assert restarter.calls == 1
+    assert len(alerts.messages) == 1
+    assert alerts.messages[0][0] == "[IBKR] Gateway requires attention"
+
+    # The persistent operator state does not generate the same email each minute.
+    assert not await watchdog.run_cycle()
+    assert len(alerts.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_email_retries_pending_incident(tmp_path):
+    alerts = RecordingAlertSender()
+    watchdog = Watchdog(
+        configuration(tmp_path),
+        FixedProbe(ProbeResult(True, "all APIs healthy")),
+        FixedRestarter((True, "unused")),
+        alert_sender=alerts,
+        clock=lambda: datetime(2026, 9, 8, 14, 0, tzinfo=UTC),
+    )
+    watchdog.state = WatchdogState(
+        status="OPERATOR_REQUIRED",
+        email_recovery_pending=True,
+        last_email_kind="OPERATOR_REQUIRED",
+        operator_required=True,
+    )
+
+    assert await watchdog.run_cycle()
+    assert len(alerts.messages) == 1
+    assert alerts.messages[0][0] == "[IBKR] Gateway recovered"
+    assert watchdog.state.last_email_kind == "RECOVERED"
+    assert not watchdog.state.email_recovery_pending
 
 
 @pytest.mark.asyncio

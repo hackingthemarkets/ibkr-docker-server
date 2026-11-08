@@ -18,7 +18,12 @@ repository_root=$(cd "${script_directory}/../.." && pwd)
 python=${IBKR_WATCHDOG_PYTHON:-${repository_root}/.venv/bin/python}
 docker=${IBKR_DOCKER:-/usr/bin/docker}
 
-for required in "${python}" "${docker}" "${repository_root}/scripts/gateway_watchdog.py"; do
+for required in \
+    "${python}" \
+    "${docker}" \
+    "${repository_root}/scripts/gateway_watchdog.py" \
+    "${repository_root}/scripts/gateway_readiness.py" \
+    "${repository_root}/scripts/watchdog_email.py"; do
     if [[ ! -e ${required} ]]; then
         echo "Required path does not exist: ${required}" >&2
         exit 1
@@ -68,6 +73,9 @@ render \
 render \
     "${script_directory}/ibkr-gateway-watchdog.service.in" \
     "${temporary_directory}/ibkr-gateway-watchdog.service"
+render \
+    "${script_directory}/ibkr-gateway-readiness.service.in" \
+    "${temporary_directory}/ibkr-gateway-readiness.service"
 
 chmod 0440 "${temporary_directory}/ibkr-gateway-watchdog.sudoers"
 visudo -cf "${temporary_directory}/ibkr-gateway-watchdog.sudoers"
@@ -81,6 +89,19 @@ install -o root -g root -m 0440 \
 install -o root -g root -m 0644 \
     "${temporary_directory}/ibkr-gateway-watchdog.service" \
     /etc/systemd/system/ibkr-gateway-watchdog.service
+install -o root -g root -m 0644 \
+    "${temporary_directory}/ibkr-gateway-readiness.service" \
+    /etc/systemd/system/ibkr-gateway-readiness.service
+install -o root -g root -m 0644 \
+    "${script_directory}/ibkr-gateway-readiness.timer" \
+    /etc/systemd/system/ibkr-gateway-readiness.timer
+
+install -o root -g "${watchdog_group}" -m 0750 -d \
+    /etc/ibkr-gateway-watchdog
+if [[ ! -e /etc/ibkr-gateway-watchdog/smtp-password ]]; then
+    install -o root -g "${watchdog_group}" -m 0640 /dev/null \
+        /etc/ibkr-gateway-watchdog/smtp-password
+fi
 
 if [[ ! -e /etc/default/ibkr-gateway-watchdog ]]; then
     install -o root -g root -m 0644 \
@@ -90,5 +111,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable ibkr-gateway-watchdog.service
+systemctl enable --now ibkr-gateway-readiness.timer
 systemctl restart ibkr-gateway-watchdog.service
 systemctl --no-pager --full status ibkr-gateway-watchdog.service
+systemctl --no-pager list-timers ibkr-gateway-readiness.timer
