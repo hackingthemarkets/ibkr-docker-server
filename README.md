@@ -15,6 +15,9 @@ be open to the internet.
 | `.env.example` | Template for the non-secret settings |
 | `connect.py` | Tests the API connection |
 | `quote.py` | Tests real-time market data |
+| `scripts/gateway_watchdog.py` | Checks Gateway and restarts it when it's stuck |
+| `scripts/gateway_readiness.py` | Prints the Sunday readiness report |
+| `deploy/gateway-watchdog/` | Installs the watchdog as a system service |
 
 ## Start Gateway on the server
 
@@ -104,6 +107,130 @@ $env:IBKR_PORT = "14002"
 ```
 
 To test paper TWS on your own computer instead, set `IBKR_PORT` to `7497`.
+
+## Keep Gateway healthy
+
+A running container doesn't mean Gateway is usable. The watchdog connects
+through the API once a minute, and it checks that it can resolve a contract and
+read account data. After five consecutive failures outside scheduled
+maintenance, it makes one automatic restart attempt. If Gateway still does not
+recover, it stops restarting and records that an operator is required. Even
+after a successful recovery, it permits no more than one automatic restart in
+24 hours.
+
+IBKR publishes a [nightly North American reset
+window](https://ndcdyn.interactivebrokers.com/en/software/systemStatus.php), and
+its Saturday maintenance can run later. From 11:50 PM through 2:05 AM Eastern,
+the watchdog continues recording health but deliberately suppresses automatic
+restarts. The window can be changed in
+`/etc/default/ibkr-gateway-watchdog`.
+
+Saturday is treated as a quiet day, and automatic recovery resumes at 8:00 AM
+Eastern on Sunday. The watchdog still records probe results, but it does not
+restart Gateway or repeat urgent log messages while the market is closed.
+
+Test one probe first. It doesn't change anything:
+
+```bash
+.venv/bin/python scripts/gateway_watchdog.py --probe-only
+```
+
+Then install the service:
+
+```bash
+sudo deploy/gateway-watchdog/install.sh
+sudo systemctl status ibkr-gateway-watchdog
+sudo journalctl -u ibkr-gateway-watchdog -f
+```
+
+The installer finds the existing Gateway container and bakes its exact name into
+a root-owned restart script. Its sudo rule lets your user run that fixed script
+without granting general Docker access. Settings are in
+`/etc/default/ibkr-gateway-watchdog`. After changing them, run:
+
+```bash
+sudo systemctl restart ibkr-gateway-watchdog
+```
+
+The current machine-readable status is stored at
+`/var/lib/ibkr-gateway-watchdog/state.json`:
+
+```bash
+sudo cat /var/lib/ibkr-gateway-watchdog/state.json
+```
+
+The status moves through `HEALTHY`, `DEGRADED`, `MAINTENANCE`, `WEEKEND_QUIET`,
+`RESTARTING` and `OPERATOR_REQUIRED`. A successful probe begins a new incident;
+the separate 24-hour restart cap remains in effect.
+
+This service watches Gateway only. It does not monitor a strategy process or
+send strategy alerts; those checks belong in the trading application.
+
+The watchdog can't complete a login or 2FA prompt for you. If Gateway is waiting
+for one, or another login is competing for the session, open it over VNC. IBKR
+may also require [manual authentication after its weekly Sunday security
+reset](https://www.ibkrguides.com/traderworkstation/auto-restart-considerations.htm).
+Fix the login or manually restart the fixed container; the next successful
+probe clears `OPERATOR_REQUIRED`:
+
+```bash
+sudo /usr/local/sbin/restart-ibkr-gateway
+```
+
+### Optional email alerts
+
+Email is optional. Without it, the watchdog still restarts Gateway, records its
+state and writes to the system journal. When authenticated SMTP is configured,
+it sends one message when Gateway requires an operator and another after
+recovery. A Sunday timer also runs a readiness probe at 9:00 AM Eastern and
+emails the result. The report still runs and is written to the journal when
+email is disabled.
+
+Edit the non-secret settings:
+
+```bash
+sudo nano /etc/default/ibkr-gateway-watchdog
+```
+
+For Mailgun in the US region, the relevant values look like this:
+
+```ini
+IBKR_ALERT_SMTP_HOST=smtp.mailgun.org
+IBKR_ALERT_SMTP_PORT=587
+IBKR_ALERT_SMTP_SECURITY=starttls
+IBKR_ALERT_SMTP_USERNAME=postmaster@mg.example.com
+IBKR_ALERT_FROM=IBKR Server <alerts@mg.example.com>
+IBKR_ALERT_TO=you@example.com
+```
+
+Use `smtp.eu.mailgun.org` for a Mailgun domain in the EU region. Other providers
+work if they offer authenticated SMTP. Put only the SMTP password in the
+protected file created by the installer:
+
+```bash
+sudo nano /etc/ibkr-gateway-watchdog/smtp-password
+sudo systemctl restart ibkr-gateway-watchdog
+```
+
+Test delivery by starting the readiness service immediately:
+
+```bash
+sudo systemctl start ibkr-gateway-readiness.service
+sudo journalctl -u ibkr-gateway-readiness.service -n 50 --no-pager
+```
+
+The scheduled run is visible with:
+
+```bash
+systemctl list-timers ibkr-gateway-readiness.timer
+```
+
+To run the tests:
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
+```
 
 ## Upgrade Gateway
 

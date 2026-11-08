@@ -1,0 +1,1 @@
+@WATCHDOG_USER@ ALL=(root) NOPASSWD: /usr/local/sbin/restart-ibkr-gateway

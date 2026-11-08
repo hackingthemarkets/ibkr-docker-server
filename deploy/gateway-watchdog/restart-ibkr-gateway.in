@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+exec @DOCKER@ restart @CONTAINER_NAME@

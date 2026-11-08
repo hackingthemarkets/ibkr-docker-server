@@ -1,0 +1,17 @@
+[Unit]
+Description=IBKR Gateway Sunday readiness report
+After=ibkr-gateway-watchdog.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@WATCHDOG_USER@
+Group=@WATCHDOG_GROUP@
+WorkingDirectory=@REPOSITORY_ROOT@
+Environment=PYTHONUNBUFFERED=1
+Environment=IBKR_WATCHDOG_STATE_PATH=/var/lib/ibkr-gateway-watchdog/state.json
+EnvironmentFile=-/etc/default/ibkr-gateway-watchdog
+ExecStart=@PYTHON@ @REPOSITORY_ROOT@/scripts/gateway_readiness.py --email
+StateDirectory=ibkr-gateway-watchdog
+StateDirectoryMode=0750
+UMask=0027
