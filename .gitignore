@@ -10,3 +10,9 @@ __pycache__/
 
 # Test caches
 .pytest_cache/
+
+# Market data built on the server
+data/
+
+# Each trading day's decisions (Part III)
+runs/
